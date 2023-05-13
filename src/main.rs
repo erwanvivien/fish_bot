@@ -9,6 +9,8 @@ use std::{
 };
 
 use chrono::Local;
+#[cfg(feature = "online")]
+use mac_address::get_mac_address;
 use windows::{
     core::{ComInterface, Result},
     Win32::{
@@ -233,6 +235,10 @@ impl eframe::App for App {
     }
 }
 
+#[cfg(feature = "online")]
+// const UUID: &str = "DEFAULT0-DEFA-DEFA-DEFA-DEFAULT00000";
+const UUID: &str = "db67dcec-be9c-4247-8f23-ca52603bf89c";
+
 fn main_loop(
     audio_session_pointer: usize,
     fish_map: Arc<Mutex<HashMap<u32, Fish>>>,
@@ -244,10 +250,61 @@ fn main_loop(
 
     let mut was_stopped = false;
 
+    #[cfg(feature = "online")]
+    let client = reqwest::blocking::Client::new();
+    #[cfg(feature = "online")]
+    let mac_address = get_mac_address()
+        .expect("InternalError while retrieving mac address")
+        .expect("No mac address found");
+
+    #[cfg(feature = "online")]
+    let mut last_check = Instant::now() - Duration::from_secs(10);
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[cfg(feature = "online")]
+    enum LastCheckStatus {
+        Ok,
+        Failed,
+        Rejected,
+    }
+    #[cfg(feature = "online")]
+    let mut last_check_status = LastCheckStatus::Ok;
+
     loop {
         if atomic_stop.load(Ordering::Relaxed) == true {
             std::thread::sleep(Duration::from_secs(1));
             was_stopped = true;
+            continue;
+        }
+
+        #[cfg(feature = "online")]
+        if last_check.elapsed().as_secs() > 5 {
+            last_check = Instant::now();
+
+            let Ok(resp) = client
+                .post("http://localhost:3000/api/ping")
+                .body(format!(
+                    r#"{{ "macAddress": "{}", "botId": "{}" }}"#,
+                    mac_address, UUID
+                )).send() else {
+                std::thread::sleep(Duration::from_secs(1));
+                eprintln!("Failed to ping server");
+                last_check_status = LastCheckStatus::Failed;
+                continue;
+            };
+            if !resp.status().is_success() {
+                eprintln!("Failed to ping server");
+                std::thread::sleep(Duration::from_secs(1));
+                last_check_status = LastCheckStatus::Rejected;
+                continue;
+            }
+
+            last_check_status = LastCheckStatus::Ok;
+        }
+
+        #[cfg(feature = "online")]
+        if last_check_status != LastCheckStatus::Ok {
+            std::thread::sleep(Duration::from_secs(1));
             continue;
         }
 
@@ -294,7 +351,7 @@ fn main_loop(
             if output.volume >= 0.01 {
                 // current_fish.debug(output.volume);
             }
-            if output.volume > 0.04 {
+            if output.volume > 0.035 {
                 current_fish.debug("Fish reeled in");
 
                 let reel_time = current_fish.last_cast.elapsed().as_secs_f32();
