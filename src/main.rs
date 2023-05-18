@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(not(debug_assertions), not(feature = "window")),
+    windows_subsystem = "windows"
+)]
+
 use std::{
     collections::HashMap,
     fmt::Display,

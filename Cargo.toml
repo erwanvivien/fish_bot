@@ -29,4 +29,6 @@ windows = { version = "0.48.0", features = [
 ] }
 
 [features]
+default = ["window"]
 online = ["dep:reqwest", "dep:mac_address"]
+window = []
