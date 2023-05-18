@@ -11,6 +11,7 @@ use std::{
 };
 
 use chrono::Local;
+use egui::{Color32, Pos2, Sense, Vec2};
 #[cfg(feature = "online")]
 use mac_address::get_mac_address;
 use windows::{
@@ -124,6 +125,7 @@ struct Fish {
     last_reel: Instant,
     last_bite: Instant,
     stop_reel: bool,
+    trigger_volume: f32,
 }
 
 impl Fish {
@@ -157,10 +159,35 @@ impl Fish {
 }
 
 #[derive(Debug, Clone)]
+struct RoundBuffer<const N: usize> {
+    buffer: [f32; N],
+    index: usize,
+}
+
+impl<const N: usize> RoundBuffer<N> {
+    fn new() -> Self {
+        Self {
+            buffer: [0f32; N],
+            index: 0,
+        }
+    }
+
+    fn push(&mut self, value: f32) {
+        self.buffer[self.index] = value;
+        self.index = (self.index + 1) % N;
+    }
+
+    fn max(&self) -> f32 {
+        self.buffer.iter().copied().fold(f32::NAN, f32::max)
+    }
+}
+
+#[derive(Debug, Clone)]
 struct FishingData {
     pub reel_count: u32,
     pub cast_count: u32,
     pub reel_average: Duration,
+    pub volume: RoundBuffer<16>,
 }
 
 impl Default for FishingData {
@@ -169,6 +196,7 @@ impl Default for FishingData {
             reel_count: 0,
             cast_count: 0,
             reel_average: Duration::from_secs(0),
+            volume: RoundBuffer::new(),
         }
     }
 }
@@ -218,11 +246,47 @@ impl eframe::App for App {
                             }
                         }
                     });
+                    let data = data_map.get(&fish_window.pid).unwrap();
                     ui.horizontal(|ui| {
-                        let data = data_map.get(&fish_window.pid).unwrap();
                         ui.label(format!("Reel count: {} |", data.reel_count));
                         ui.label(format!("Cast count: {} |", data.cast_count));
                         ui.label(format!("Real avg time: {:?} |", data.reel_average));
+                    });
+                    ui.horizontal(|ui| {
+                        let (id, rect) = ui.allocate_space(egui::vec2(70.0, 24.0));
+                        let response = ui.interact(rect, id, egui::Sense::click());
+
+                        // paint rect
+                        let visuals = ui.style().interact(&response);
+                        ui.painter().rect_filled(rect, 0.0, visuals.bg_fill);
+
+                        // paint rect in green
+                        let pos_end = Pos2 {
+                            y: rect.max.y,
+                            x: rect.min.x + rect.width() * data.volume.max() * 10f32,
+                        };
+                        let rect = egui::Rect {
+                            max: pos_end,
+                            ..rect
+                        };
+                        ui.painter().rect_filled(rect, 0.0, Color32::GREEN);
+
+                        response.on_hover_text(format!("Volume: {}%", data.volume.max() * 100f32));
+
+                        let trigger_volume =
+                            fish_map.get_mut(&fish_window.pid).unwrap().trigger_volume;
+                        let trigger_volume_string = &mut (trigger_volume * 100f32).to_string();
+                        if !trigger_volume_string.contains(".") {
+                            trigger_volume_string.push('.');
+                        }
+
+                        let response = ui.add(egui::TextEdit::singleline(trigger_volume_string));
+                        if response.changed() {
+                            if let Ok(value) = trigger_volume_string.parse::<f32>() {
+                                fish_map.get_mut(&fish_window.pid).unwrap().trigger_volume =
+                                    value / 100f32;
+                            }
+                        }
                     });
                     ui.add_space(8f32);
                 }
@@ -238,7 +302,7 @@ impl eframe::App for App {
             }
         });
 
-        ctx.request_repaint_after(Duration::from_millis(2000));
+        ctx.request_repaint_after(Duration::from_millis(50));
     }
 }
 
@@ -324,6 +388,13 @@ fn main_loop(
             let current_fish = fish_map.get_mut(&output.pid).unwrap();
             let mut fish_data = data_map.lock().unwrap();
 
+            // Update volume data
+            fish_data
+                .get_mut(&output.pid)
+                .unwrap()
+                .volume
+                .push(output.volume);
+
             // Fish is waiting to be reeled in
             if current_fish.last_bite > Instant::now() || current_fish.stop_reel {
                 continue;
@@ -379,7 +450,7 @@ fn main_loop(
                 current_fish.debug(output.volume);
             }
 
-            if output.volume > 0.035 {
+            if output.volume > current_fish.trigger_volume {
                 use rand::Rng;
                 let mut rng = rand::thread_rng();
                 let random = rng.gen_range(100..500);
@@ -439,6 +510,7 @@ fn main() -> Result<()> {
                     last_cast: Instant::now() - Duration::from_secs(3600),
                     last_reel: Instant::now() - Duration::from_secs(3600),
                     stop_reel: false,
+                    trigger_volume: 0.035,
                 },
             );
 
