@@ -1,10 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::Display,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -120,6 +117,7 @@ struct Fish {
     name: String,
     last_cast: Instant,
     last_reel: Instant,
+    stop_reel: bool,
 }
 
 impl Fish {
@@ -172,23 +170,22 @@ impl Default for FishingData {
 struct App {
     fish_map: Arc<Mutex<HashMap<u32, Fish>>>,
     data_map: Arc<Mutex<HashMap<u32, FishingData>>>,
-    atomic_stop: Arc<AtomicBool>,
+    is_stop: bool,
     start_time: chrono::DateTime<Local>,
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut fish_map = self.fish_map.lock().unwrap();
-        let mut data_map = self.data_map.lock().unwrap();
+        let data_map = self.data_map.lock().unwrap();
 
-        let stop_start = if self.atomic_stop.load(Ordering::Relaxed) {
+        let stop_start = if self.is_stop {
             "Start fishing"
         } else {
             "Stop fishing"
         };
 
         let fish_values = fish_map.values().cloned().collect::<Vec<_>>();
-        let data_clone = data_map.clone();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Awesome Fishing bot");
@@ -201,10 +198,11 @@ impl eframe::App for App {
 
             ui.vertical(|ui| {
                 for fish_window in fish_values {
+                    let play_pause = if fish_window.stop_reel { "⏵" } else { "⏸" };
                     ui.horizontal(|ui| {
-                        if ui.button("X").clicked() {
-                            fish_map.remove(&fish_window.pid);
-                            data_map.remove(&fish_window.pid);
+                        if ui.button(play_pause).clicked() {
+                            fish_map.get_mut(&fish_window.pid).unwrap().stop_reel =
+                                !fish_window.stop_reel;
                         }
 
                         ui.label(format!("{}: {}", fish_window.name, fish_window.pid));
@@ -215,7 +213,7 @@ impl eframe::App for App {
                         }
                     });
                     ui.horizontal(|ui| {
-                        let data = data_clone.get(&fish_window.pid).unwrap();
+                        let data = data_map.get(&fish_window.pid).unwrap();
                         ui.label(format!("Reel count: {} |", data.reel_count));
                         ui.label(format!("Cast count: {} |", data.cast_count));
                         ui.label(format!("Real avg time: {:?} |", data.reel_average));
@@ -227,7 +225,10 @@ impl eframe::App for App {
             ui.add_space(16f32);
 
             if ui.button(stop_start).clicked() {
-                self.atomic_stop.fetch_xor(true, Ordering::Relaxed);
+                self.is_stop = !self.is_stop;
+                for fish in fish_map.values_mut() {
+                    fish.stop_reel = self.is_stop;
+                }
             }
         });
 
@@ -243,12 +244,9 @@ fn main_loop(
     audio_session_pointer: usize,
     fish_map: Arc<Mutex<HashMap<u32, Fish>>>,
     data_map: Arc<Mutex<HashMap<u32, FishingData>>>,
-    atomic_stop: Arc<AtomicBool>,
 ) -> Result<()> {
     let audio_session_enumerator: IAudioSessionEnumerator =
         unsafe { std::mem::transmute(audio_session_pointer) };
-
-    let mut was_stopped = false;
 
     #[cfg(feature = "online")]
     let client = reqwest::blocking::Client::new();
@@ -271,12 +269,6 @@ fn main_loop(
     let mut last_check_status = LastCheckStatus::Ok;
 
     loop {
-        if atomic_stop.load(Ordering::Relaxed) == true {
-            std::thread::sleep(Duration::from_secs(1));
-            was_stopped = true;
-            continue;
-        }
-
         #[cfg(feature = "online")]
         if last_check.elapsed().as_secs() > 5 {
             last_check = Instant::now();
@@ -325,7 +317,7 @@ fn main_loop(
 
             let current_fish = fish_map.get_mut(&output.pid).unwrap();
             // Wait 1 second between reel and cast
-            if current_fish.last_reel.elapsed() < Duration::from_secs(1) {
+            if current_fish.last_reel.elapsed() < Duration::from_secs(1) || current_fish.stop_reel {
                 continue;
             }
 
@@ -337,7 +329,7 @@ fn main_loop(
                 continue;
             }
             // Reset cast if we haven't reeled in for 30 seconds
-            if current_fish.last_cast.elapsed() > Duration::from_secs(30) || was_stopped {
+            if current_fish.last_cast.elapsed() > Duration::from_secs(30) {
                 current_fish.debug("RESET CAST");
                 fish_data.get_mut(&output.pid).unwrap().cast_count += 1;
                 current_fish.fish();
@@ -371,7 +363,6 @@ fn main_loop(
             }
         }
 
-        was_stopped = false;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
@@ -421,6 +412,7 @@ fn main() -> Result<()> {
                     pid: output.pid,
                     last_cast: Instant::now() - Duration::from_secs(3600),
                     last_reel: Instant::now() - Duration::from_secs(3600),
+                    stop_reel: false,
                 },
             );
 
@@ -430,14 +422,11 @@ fn main() -> Result<()> {
         }
     }
 
-    let atomic_stop = Arc::new(AtomicBool::new(false));
-    let atomic_stop_clone = atomic_stop.clone();
-
     // This is a hack to get around the fact that we can't pass a pointer to a thread
     let audio_session_pointer: usize = unsafe { std::mem::transmute(audio_session_enumerator) };
 
     let main_thread = std::thread::spawn(move || {
-        let _ = main_loop(audio_session_pointer, fish_map, data_map, atomic_stop);
+        let _ = main_loop(audio_session_pointer, fish_map, data_map);
     });
 
     let options = eframe::NativeOptions {
@@ -445,7 +434,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
     let app = App {
-        atomic_stop: atomic_stop_clone,
+        is_stop: false,
         data_map: data_map_ui,
         fish_map: fish_map_ui,
         start_time: chrono::Local::now(),
