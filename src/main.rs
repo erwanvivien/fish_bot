@@ -122,6 +122,7 @@ struct Fish {
     name: String,
     last_cast: Instant,
     last_reel: Instant,
+    last_bite: Instant,
     stop_reel: bool,
 }
 
@@ -321,12 +322,40 @@ fn main_loop(
             }
 
             let current_fish = fish_map.get_mut(&output.pid).unwrap();
-            // Wait 1 second between reel and cast
-            if current_fish.last_reel.elapsed() < Duration::from_secs(1) || current_fish.stop_reel {
+            let mut fish_data = data_map.lock().unwrap();
+
+            // Fish is waiting to be reeled in
+            if current_fish.last_bite > Instant::now() || current_fish.stop_reel {
                 continue;
             }
 
-            let mut fish_data = data_map.lock().unwrap();
+            // Fish has waited enough time to be reeled in
+            if current_fish.last_bite > current_fish.last_reel {
+                current_fish.debug("Fish reeled in");
+
+                let reel_time = current_fish.last_cast.elapsed().as_secs_f32();
+                current_fish.fish();
+                current_fish.last_reel = Instant::now();
+
+                let FishingData {
+                    reel_average,
+                    reel_count,
+                    ..
+                } = fish_data.get(&output.pid).unwrap();
+                let reel_average = (reel_average.as_secs_f32() * *reel_count as f32 + reel_time)
+                    / (reel_count + 1) as f32;
+                fish_data.get_mut(&output.pid).unwrap().reel_count += 1;
+                fish_data.get_mut(&output.pid).unwrap().reel_average =
+                    Duration::from_secs_f32(reel_average);
+
+                continue;
+            }
+
+            // Wait 1 second between reel and cast
+            if current_fish.last_reel.elapsed() < Duration::from_secs(1) {
+                continue;
+            }
+
             // Cast if we have reel'd in
             if current_fish.last_cast < current_fish.last_reel {
                 fish_data.get_mut(&output.pid).unwrap().cast_count += 1;
@@ -345,26 +374,17 @@ fn main_loop(
                 continue;
             }
 
+            #[cfg(debug_assertions)]
             if output.volume >= 0.01 {
-                // current_fish.debug(output.volume);
+                current_fish.debug(output.volume);
             }
+
             if output.volume > 0.035 {
-                current_fish.debug("Fish reeled in");
-
-                let reel_time = current_fish.last_cast.elapsed().as_secs_f32();
-                current_fish.fish();
-                current_fish.last_reel = Instant::now();
-
-                let FishingData {
-                    reel_average,
-                    reel_count,
-                    ..
-                } = fish_data.get(&output.pid).unwrap();
-                let reel_average = (reel_average.as_secs_f32() * *reel_count as f32 + reel_time)
-                    / (reel_count + 1) as f32;
-                fish_data.get_mut(&output.pid).unwrap().reel_count += 1;
-                fish_data.get_mut(&output.pid).unwrap().reel_average =
-                    Duration::from_secs_f32(reel_average);
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                let random = rng.gen_range(100..500);
+                current_fish.debug(format!("BITE! Reel in {}ms", random));
+                current_fish.last_bite = Instant::now() + Duration::from_millis(random);
             }
         }
 
@@ -415,6 +435,7 @@ fn main() -> Result<()> {
                     hwnd: output.hwnd,
                     name: output.name,
                     pid: output.pid,
+                    last_bite: Instant::now() - Duration::from_secs(7200),
                     last_cast: Instant::now() - Duration::from_secs(3600),
                     last_reel: Instant::now() - Duration::from_secs(3600),
                     stop_reel: false,
