@@ -263,7 +263,7 @@ impl eframe::App for App {
                         // paint rect in green
                         let pos_end = Pos2 {
                             y: rect.max.y,
-                            x: rect.min.x + rect.width() * data.volume.max() * 10f32,
+                            x: rect.min.x + rect.width() * data.volume.max(),
                         };
                         let rect = egui::Rect {
                             max: pos_end,
@@ -433,6 +433,7 @@ fn main_loop(
                 current_fish.fish();
                 continue;
             }
+
             // Reset cast if we haven't reeled in for 30 seconds
             if current_fish.last_cast.elapsed() > Duration::from_secs(30) {
                 current_fish.debug("RESET CAST");
@@ -440,6 +441,7 @@ fn main_loop(
                 current_fish.fish();
                 continue;
             }
+
             // Don't process volume for 5 seconds after cast
             if current_fish.last_cast.elapsed() < Duration::from_secs(5) {
                 continue;
@@ -523,12 +525,13 @@ fn main() -> Result<()> {
     // This is a hack to get around the fact that we can't pass a pointer to a thread
     let audio_session_pointer: usize = unsafe { std::mem::transmute(audio_session_enumerator) };
 
+    let window_count = fish_map.lock().unwrap().len();
     let main_thread = std::thread::spawn(move || {
         let _ = main_loop(audio_session_pointer, fish_map, data_map);
     });
 
     let options = eframe::NativeOptions {
-        initial_window_size: Some(egui::Vec2::new(400.0, 400.0)),
+        initial_window_size: Some(egui::Vec2::new(400.0, 130.0 + window_count as f32 * 80.0)),
         ..Default::default()
     };
     let app = App {
@@ -543,7 +546,7 @@ fn main() -> Result<()> {
         options,
         Box::new(|_cc| Box::new(app)),
     );
-    main_thread.join().unwrap();
+    drop(main_thread);
 
     Ok(())
 }
